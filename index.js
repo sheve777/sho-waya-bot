@@ -13,10 +13,10 @@ const LINE_ACCESS_TOKEN = process.env.LINE_ACCESS_TOKEN;
 const LINE_REPLY_ENDPOINT = 'https://api.line.me/v2/bot/message/reply';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-// menu.json を読み込む
+// メニュー読み込み
 const menu = JSON.parse(fs.readFileSync(path.join(__dirname, 'menu.json'), 'utf-8'));
 
-// 値段を検索する関数
+// 値段検索関数
 function searchPriceFromMenu(userText) {
   for (const item of menu) {
     if (userText.includes(item.品名)) {
@@ -26,7 +26,10 @@ function searchPriceFromMenu(userText) {
   return null;
 }
 
-// LINEからメッセージ受信
+// 会話履歴マップ（userIdごとに記録）
+const conversationMap = new Map();
+
+// Webhook受信
 app.post('/webhook', async (req, res) => {
   const events = req.body.events;
 
@@ -34,33 +37,51 @@ app.post('/webhook', async (req, res) => {
     if (event.type === 'message' && event.message.type === 'text') {
       const userMessage = event.message.text;
       const replyToken = event.replyToken;
+      const userId = event.source.userId;
 
+      // 会話履歴の初期化
+      if (!conversationMap.has(userId)) {
+        conversationMap.set(userId, []);
+      }
+      const history = conversationMap.get(userId);
+
+      // システムプロンプト（最初のみ）
+      if (history.length === 0) {
+        history.push({
+          role: 'system',
+          content: 'あなたは居酒屋「笑わ家（しょうわや）」のマスターです。昭和の雰囲気で丁寧に、フレンドリーにお客様と会話してください。'
+        });
+      }
+
+      // 値段チェック（マスターに伝える用）
+      const priceAnswer = searchPriceFromMenu(userMessage);
+      if (priceAnswer) {
+        history.push({
+          role: 'system',
+          content: `以下の情報はメニュー検索から得られた価格です：「${priceAnswer}」。それを参考にマスターとして返答してください。`
+        });
+      }
+
+      // 「おすすめ」ワードチェック
       const triggers = ["おすすめ", "何食べ", "何飲む", "迷ってる", "今日のおすすめ"];
       const isRecommendation = triggers.some(word => userMessage.includes(word));
 
+      let replyText = '';
+
       try {
-        let replyText;
-        const priceAnswer = searchPriceFromMenu(userMessage);
-
-        // システムメッセージ：マスター人格＋価格情報があれば補足
-        let systemPrompt = 'あなたは居酒屋「笑わ家（しょうわや）」のマスターです。昭和の雰囲気で、フレンドリーかつ丁寧に接客してください。';
-        if (priceAnswer) {
-          systemPrompt += `\n以下の価格情報を参考にしてください：「${priceAnswer}」`;
-        }
-
         if (isRecommendation) {
-          // 🍱 GPTでおすすめ（メニュー限定）
+          // GPTでおすすめ
           replyText = await recommendFromShowaya();
         } else {
-          // 💬 GPTで応答（必要なら価格情報含める）
+          // 会話履歴にユーザー発話を追加
+          history.push({ role: 'user', content: userMessage });
+
+          // GPTに問い合わせ
           const chatResponse = await axios.post(
             'https://api.openai.com/v1/chat/completions',
             {
               model: 'gpt-4',
-              messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: userMessage }
-              ]
+              messages: history
             },
             {
               headers: {
@@ -69,10 +90,14 @@ app.post('/webhook', async (req, res) => {
               }
             }
           );
+
           replyText = chatResponse.data.choices[0].message.content;
+
+          // 応答を会話履歴に追加
+          history.push({ role: 'assistant', content: replyText });
         }
 
-        // LINEに返答
+        // LINEへ返信
         await axios.post(
           LINE_REPLY_ENDPOINT,
           {
