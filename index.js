@@ -2,7 +2,6 @@ const express = require('express');
 const axios = require('axios');
 const bodyParser = require('body-parser');
 require('dotenv').config();
-const { recommendFromShowaya } = require('./recommend');
 const fs = require('fs');
 const path = require('path');
 
@@ -16,7 +15,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 // メニュー読み込み
 const menu = JSON.parse(fs.readFileSync(path.join(__dirname, 'menu.json'), 'utf-8'));
 
-// 値段検索関数
+// 値段検索
 function searchPriceFromMenu(userText) {
   for (const item of menu) {
     if (userText.includes(item.品名)) {
@@ -26,10 +25,20 @@ function searchPriceFromMenu(userText) {
   return null;
 }
 
-// 会話履歴マップ（userIdごとに記録）
+// おすすめ生成（カテゴリを絞る）
+function recommendFromShowaya() {
+  const recommendCategories = [
+    "焼き物", "刺し", "揚げ物", "煮込み", "一品料理",
+    "炭火串焼き（豚肉）", "炭火串焼き（鶏肉）", "野菜串焼き", "うなぎ串焼き"
+  ];
+  const filtered = menu.filter(item => recommendCategories.includes(item.カテゴリ));
+  const randomItems = [...filtered].sort(() => 0.5 - Math.random()).slice(0, 3);
+  return `今日のおすすめはこちらです！\n・${randomItems.map(i => `${i.品名}（${i.価格}円）`).join('\n・')}`;
+}
+
+// 会話履歴（ユーザーIDごと）
 const conversationMap = new Map();
 
-// Webhook受信
 app.post('/webhook', async (req, res) => {
   const events = req.body.events;
 
@@ -39,44 +48,44 @@ app.post('/webhook', async (req, res) => {
       const replyToken = event.replyToken;
       const userId = event.source.userId;
 
-      // 会話履歴の初期化
+      // 履歴用意
       if (!conversationMap.has(userId)) {
         conversationMap.set(userId, []);
       }
       const history = conversationMap.get(userId);
 
-      // システムプロンプト（最初のみ）
+      // 最初の人格指定
       if (history.length === 0) {
         history.push({
           role: 'system',
-          content: 'あなたは居酒屋「笑わ家（しょうわや）」のマスターです。昭和の雰囲気で丁寧に、フレンドリーにお客様と会話してください。'
+          content: `
+あなたは昭和の雰囲気が残る居酒屋「笑わ家（しょうわや）」のマスターです。
+口調は丁寧で親しみやすく、お客様との会話を楽しみながら接客してください。
+提案や案内は必ず「menu.json」のメニューにあるものだけにしてください。
+飲み放題、コース、存在しない料理・ドリンクは提案してはいけません。
+`
         });
       }
 
-      // 値段チェック（マスターに伝える用）
-      const priceAnswer = searchPriceFromMenu(userMessage);
-      if (priceAnswer) {
-        history.push({
-          role: 'system',
-          content: `以下の情報はメニュー検索から得られた価格です：「${priceAnswer}」。それを参考にマスターとして返答してください。`
-        });
-      }
-
-      // 「おすすめ」ワードチェック
       const triggers = ["おすすめ", "何食べ", "何飲む", "迷ってる", "今日のおすすめ"];
       const isRecommendation = triggers.some(word => userMessage.includes(word));
+      const priceAnswer = searchPriceFromMenu(userMessage);
 
       let replyText = '';
 
       try {
         if (isRecommendation) {
-          // GPTでおすすめ
-          replyText = await recommendFromShowaya();
+          replyText = recommendFromShowaya();
         } else {
-          // 会話履歴にユーザー発話を追加
+          if (priceAnswer) {
+            history.push({
+              role: 'assistant',
+              content: priceAnswer
+            });
+          }
+
           history.push({ role: 'user', content: userMessage });
 
-          // GPTに問い合わせ
           const chatResponse = await axios.post(
             'https://api.openai.com/v1/chat/completions',
             {
@@ -92,8 +101,6 @@ app.post('/webhook', async (req, res) => {
           );
 
           replyText = chatResponse.data.choices[0].message.content;
-
-          // 応答を会話履歴に追加
           history.push({ role: 'assistant', content: replyText });
         }
 
@@ -120,7 +127,7 @@ app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
 });
 
-// サーバー起動
+// 起動
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`マスターのサーバーが起動しました！ポート: ${PORT}`);
