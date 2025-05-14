@@ -1,7 +1,6 @@
 const { ChatGPTAPI } = require('chatgpt');
 const fs = require('fs');
 require('dotenv').config();
-const { recommendFromShowaya } = require('./recommend');
 
 
 const api = new ChatGPTAPI({
