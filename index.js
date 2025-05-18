@@ -1,3 +1,37 @@
+const express = require('express');
+const axios = require('axios');
+const bodyParser = require('body-parser');
+require('dotenv').config();
+const fs = require('fs');
+const path = require('path');
+const { recommendFromShowaya } = require('./recommend');
+
+// メニュー読み込み
+const menu = JSON.parse(fs.readFileSync(path.join(__dirname, 'menu.json'), 'utf-8'));
+
+// 値段検索
+function searchPriceFromMenu(userText) {
+  for (const item of menu) {
+    if (userText.includes(item.品名)) {
+      return `${item.品名} は ${item.価格}円です。`;
+    }
+  }
+  return null;
+}
+
+// Express 初期化
+const app = express();
+app.use(bodyParser.json());
+
+// 環境変数
+const LINE_ACCESS_TOKEN = process.env.LINE_ACCESS_TOKEN;
+const LINE_REPLY_ENDPOINT = 'https://api.line.me/v2/bot/message/reply';
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+// 会話履歴（userId ごと）
+const conversationMap = new Map();
+
+// Webhook エンドポイント
 app.post('/webhook', async (req, res) => {
   const events = req.body.events;
 
@@ -7,14 +41,14 @@ app.post('/webhook', async (req, res) => {
       const replyToken = event.replyToken;
       const userId = event.source.userId;
 
-      // 会話履歴がなければ初期化
+      // 会話履歴の初期化
       if (!conversationMap.has(userId)) {
         conversationMap.set(userId, []);
       }
 
       const history = conversationMap.get(userId);
 
-      // 履歴が空ならsystemプロンプトを追加
+      // 最初のsystemプロンプト
       if (history.length === 0) {
         history.push({
           role: 'system',
@@ -35,8 +69,10 @@ app.post('/webhook', async (req, res) => {
 
       try {
         if (isRecommendation) {
+          // ✅ おすすめは独立処理
           replyText = recommendFromShowaya();
         } else {
+          // ✅ 値段だけの応答も事前に入れて文脈維持
           if (priceAnswer) {
             history.push({
               role: 'assistant',
@@ -44,6 +80,7 @@ app.post('/webhook', async (req, res) => {
             });
           }
 
+          // ユーザー発話
           history.push({ role: 'user', content: userMessage });
 
           const chatResponse = await axios.post(
@@ -61,9 +98,12 @@ app.post('/webhook', async (req, res) => {
           );
 
           replyText = chatResponse.data.choices[0].message.content;
+
+          // GPT返答を履歴に保存
           history.push({ role: 'assistant', content: replyText });
         }
 
+        // LINEに送信
         await axios.post(
           LINE_REPLY_ENDPOINT,
           {
@@ -84,4 +124,10 @@ app.post('/webhook', async (req, res) => {
   }
 
   res.sendStatus(200);
+});
+
+// サーバー起動
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`マスターのサーバーが起動しました！ポート: ${PORT}`);
 });
