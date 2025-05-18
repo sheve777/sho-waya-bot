@@ -1,10 +1,11 @@
 const express = require('express');
+const app = express(); // ← 忘れずに追加！
 const axios = require('axios');
 const bodyParser = require('body-parser');
 require('dotenv').config();
+
 const fs = require('fs');
 const path = require('path');
-const { recommendFromShowaya } = require('./recommend');
 
 // メニュー読み込み
 const menu = JSON.parse(fs.readFileSync(path.join(__dirname, 'menu.json'), 'utf-8'));
@@ -19,19 +20,27 @@ function searchPriceFromMenu(userText) {
   return null;
 }
 
-// Express 初期化
-const app = express();
+// おすすめ生成（カテゴリを絞る）
+function recommendFromShowaya() {
+  const recommendCategories = [
+    "焼き物", "刺し", "揚げ物", "煮込み", "一品料理",
+    "炭火串焼き（豚肉）", "炭火串焼き（鶏肉）", "野菜串焼き", "うなぎ串焼き"
+  ];
+  const filtered = menu.filter(item => recommendCategories.includes(item.カテゴリ));
+  const randomItems = [...filtered].sort(() => 0.5 - Math.random()).slice(0, 3);
+  return `今日のおすすめはこちらです！\n・${randomItems.map(i => `${i.品名}（${i.価格}円）`).join('\n・')}`;
+}
+
 app.use(bodyParser.json());
 
-// 環境変数
 const LINE_ACCESS_TOKEN = process.env.LINE_ACCESS_TOKEN;
-const LINE_REPLY_ENDPOINT = 'https://api.line.me/v2/bot/message/reply';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const LINE_REPLY_ENDPOINT = 'https://api.line.me/v2/bot/message/reply';
 
-// 会話履歴（userId ごと）
+// 会話履歴（ユーザーIDごと）
 const conversationMap = new Map();
 
-// Webhook エンドポイント
+// Webhook受信
 app.post('/webhook', async (req, res) => {
   const events = req.body.events;
 
@@ -41,23 +50,17 @@ app.post('/webhook', async (req, res) => {
       const replyToken = event.replyToken;
       const userId = event.source.userId;
 
-      // 会話履歴の初期化
+      // 履歴用意
       if (!conversationMap.has(userId)) {
         conversationMap.set(userId, []);
       }
-
       const history = conversationMap.get(userId);
 
-      // 最初のsystemプロンプト
+      // 最初の人格指定
       if (history.length === 0) {
         history.push({
           role: 'system',
-          content: `
-あなたは昭和の雰囲気が残る居酒屋「笑わ家（しょうわや）」のマスターです。
-口調は丁寧で親しみやすく、お客様との会話を楽しみながら接客してください。
-提案や案内は必ず「menu.json」のメニューにあるものだけにしてください。
-飲み放題、コース、存在しない料理・ドリンクは提案してはいけません。
-          `.trim()
+          content: 'あなたは居酒屋「笑わ家（しょうわや）」のマスターです。昭和の雰囲気で丁寧に、フレンドリーにお客様と会話してください。'
         });
       }
 
@@ -68,19 +71,14 @@ app.post('/webhook', async (req, res) => {
       let replyText = '';
 
       try {
-        if (isRecommendation) {
-          // ✅ おすすめは独立処理
+        if (priceAnswer) {
+          // 値段検索結果を返信
+          replyText = priceAnswer;
+        } else if (isRecommendation) {
+          // GPTでおすすめ（ただし明示的にmenuから抽出）
           replyText = recommendFromShowaya();
         } else {
-          // ✅ 値段だけの応答も事前に入れて文脈維持
-          if (priceAnswer) {
-            history.push({
-              role: 'assistant',
-              content: priceAnswer
-            });
-          }
-
-          // ユーザー発話
+          // 通常のChatGPT応答
           history.push({ role: 'user', content: userMessage });
 
           const chatResponse = await axios.post(
@@ -98,25 +96,25 @@ app.post('/webhook', async (req, res) => {
           );
 
           replyText = chatResponse.data.choices[0].message.content;
-
-          // GPT返答を履歴に保存
           history.push({ role: 'assistant', content: replyText });
         }
 
-        // LINEに送信
-        await axios.post(
-          LINE_REPLY_ENDPOINT,
-          {
-            replyToken: replyToken,
-            messages: [{ type: 'text', text: replyText }]
-          },
-          {
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${LINE_ACCESS_TOKEN}`
+        // 応答をLINEに返す（空の場合を除外）
+        if (replyText) {
+          await axios.post(
+            LINE_REPLY_ENDPOINT,
+            {
+              replyToken: replyToken,
+              messages: [{ type: 'text', text: replyText }]
+            },
+            {
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${LINE_ACCESS_TOKEN}`
+              }
             }
-          }
-        );
+          );
+        }
       } catch (error) {
         console.error('エラー:', error.response?.data || error.message);
       }
@@ -126,7 +124,7 @@ app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
 });
 
-// サーバー起動
+// 起動
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`マスターのサーバーが起動しました！ポート: ${PORT}`);
